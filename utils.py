@@ -7,40 +7,50 @@ from torch.utils.data import DataLoader
 def intersection_over_union(
     boxes_preds: Tensor,
     boxes_targets: Tensor,
-    bbox_format: str = "midpoint"
+    box_format: str = "midpoint",
 ):
+    """
+    boxes_preds:   (..., 4)
+    boxes_targets: (..., 4)
 
-    if bbox_format == "midpoint":
-        box1_x1 = boxes_preds[:, 0:1] - boxes_preds[:, 2:3] / 2
-        box1_y1 = boxes_preds[:, 1:2] - boxes_preds[:, 3:4] / 2
-        box1_x2 = boxes_preds[:, 0:1] + boxes_preds[:, 2:3] / 2
-        box1_y2 = boxes_preds[:, 1:2] + boxes_preds[:, 3:4] / 2
-    
-        box2_x1 = boxes_targets[:, 0:1] - boxes_targets[:, 2:3] / 2
-        box2_y1 = boxes_targets[:, 1:2] - boxes_targets[:, 3:4] / 2
-        box2_x2 = boxes_targets[:, 0:1] + boxes_targets[:, 2:3] / 2 
-        box2_y2 = boxes_targets[:, 1:2] + boxes_targets[:, 3:4] / 2
-        
-    elif bbox_format == "corners":
-        box1_x1 = boxes_preds[:, 0:1]
-        box1_y1 = boxes_preds[:, 1:2]
-        box1_x2 = boxes_preds[:, 2:3]
-        box1_y2 = boxes_preds[:, 3:4]
-    
-        box2_x1 = boxes_targets[:, 0:1]
-        box2_y1 = boxes_targets[:, 1:2]
-        box2_x2 = boxes_targets[:, 2:3]
-        box2_y2 = boxes_targets[:, 3:4]
+    Returns:
+        IoU with shape (..., 1)
+    """
+
+    if box_format == "midpoint":
+        box1_x1 = boxes_preds[..., 0:1] - boxes_preds[..., 2:3] / 2
+        box1_y1 = boxes_preds[..., 1:2] - boxes_preds[..., 3:4] / 2
+        box1_x2 = boxes_preds[..., 0:1] + boxes_preds[..., 2:3] / 2
+        box1_y2 = boxes_preds[..., 1:2] + boxes_preds[..., 3:4] / 2
+
+        box2_x1 = boxes_targets[..., 0:1] - boxes_targets[..., 2:3] / 2
+        box2_y1 = boxes_targets[..., 1:2] - boxes_targets[..., 3:4] / 2
+        box2_x2 = boxes_targets[..., 0:1] + boxes_targets[..., 2:3] / 2
+        box2_y2 = boxes_targets[..., 1:2] + boxes_targets[..., 3:4] / 2
+
+    elif box_format == "corners":
+        box1_x1 = boxes_preds[..., 0:1]
+        box1_y1 = boxes_preds[..., 1:2]
+        box1_x2 = boxes_preds[..., 2:3]
+        box1_y2 = boxes_preds[..., 3:4]
+
+        box2_x1 = boxes_targets[..., 0:1]
+        box2_y1 = boxes_targets[..., 1:2]
+        box2_x2 = boxes_targets[..., 2:3]
+        box2_y2 = boxes_targets[..., 3:4]
+
+    else:
+        raise ValueError(f"Unsupported box_format: {box_format}")
 
     x1 = torch.max(box1_x1, box2_x1)
     y1 = torch.max(box1_y1, box2_y1)
     x2 = torch.min(box1_x2, box2_x2)
     y2 = torch.min(box1_y2, box2_y2)
 
-    intersection = (x2-x1).clamp(0) * (y2-y1).clamp(0)
+    intersection = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
 
-    box1_area = (box1_x2 - box1_x1).clamp(0) * (box1_y2 - box1_y1).clamp(0)
-    box2_area = (box2_x2 - box2_x1).clamp(0) * (box2_y2 - box2_y1).clamp(0)
+    box1_area = (box1_x2 - box1_x1).abs() * (box1_y2 - box1_y1).abs()
+    box2_area = (box2_x2 - box2_x1).abs() * (box2_y2 - box2_y1).abs()
 
     return intersection / (box1_area + box2_area - intersection + 1e-6)
 
@@ -101,10 +111,10 @@ def mean_average_precision(
         for key, value in total_boxes_per_image.items():
             total_boxes_per_image[key] = torch.zeros(value)
 
-        detections.sort(key, lambda x: x[2], reverse=True)
+        detections.sort(key=lambda x: x[2], reverse=True)
         true_positives = torch.zeros((len(detections)))
         false_positives = torch.zeros((len(detections)))
-        total_true_bboxes = len(ground_truth)
+        total_true_bboxes = len(ground_truths)
 
 
         for detection_index, detection in enumerate(detections):
@@ -128,9 +138,9 @@ def mean_average_precision(
 
 
             if best_iou > iou_threshold:
-                if total_boxes_per_image[detections[0]][best_gt_index] == 0:
+                if total_boxes_per_image[detection[0]][best_gt_index] == 0:
                     true_positives[detection_index] = 1
-                    total_boxes_per_image[detections[0]][best_gt_index] = 1
+                    total_boxes_per_image[detection[0]][best_gt_index] = 1
                 else:
                     false_positives[detection_index] = 1
 
@@ -138,15 +148,15 @@ def mean_average_precision(
                 false_positives[detection_index] = 1
 
 
-        true_positives_cumulative_sum = torch.cumsum(true_positives, index=0)
-        false_positves_cumulative_sum = torch.cumsum(false_positives,index=0)
+        true_positives_cumulative_sum = torch.cumsum(true_positives, dim=0)
+        false_positves_cumulative_sum = torch.cumsum(false_positives, dim=0)
 
         recalls = true_positives_cumulative_sum / (total_true_bboxes + epsilon)
         precisions = true_positives_cumulative_sum / (true_positives_cumulative_sum + false_positves_cumulative_sum + epsilon)
-        precisions = tensor.cat((torch.tensor[1], precisions)) # add 1 to the start
-        recalls = tensor.cat((torch.tensor[0], recalls)) # add 0 to the start
+        precisions = torch.cat((torch.tensor([1]), precisions)) # add 1 to the start
+        recalls = torch.cat((torch.tensor([0]), recalls)) # add 0 to the start
 
-        average_precision.append(torch.trapz(precisions, recalls)) # calcualte are under curve
+        average_precisions.append(torch.trapz(precisions, recalls)) # calcualte are under curve
 
         return sum(average_precisions) / len(average_precisions)
 
@@ -159,6 +169,9 @@ def get_bboxes(
     pred_format:str ="cells",
     box_format:str ="midpoint",
     device:str ="cuda",
+    S: int = 7,
+    C: int = 7,
+    B: int = 2,
 ):
     all_pred_boxes = []
     all_true_boxes = []
@@ -175,27 +188,26 @@ def get_bboxes(
             predictions = model(x)
 
         batch_size = x.shape[0]
-        true_bboxes = cellboxes_to_boxes(labels)
-        bboxes = cellboxes_to_boxes(predictions)
+        
+        true_bboxes = cellboxes_to_boxes(
+            labels, S=S, C=C, B=B, is_predictions=False
+        )
+        pred_bboxes = cellboxes_to_boxes(
+            predictions, S=S, C=C, B=B, is_predictions=True
+        )
 
         for idx in range(batch_size):
             nms_boxes = non_max_suppression(
-                bboxes[idx],
+                pred_bboxes[idx],
                 iou_threshold=iou_threshold,
-                threshold=threshold,
+                prob_threshold=threshold,
                 box_format=box_format,
             )
-
-
-            #if batch_idx == 0 and idx == 0:
-            #    plot_image(x[idx].permute(1,2,0).to("cpu"), nms_boxes)
-            #    print(nms_boxes)
 
             for nms_box in nms_boxes:
                 all_pred_boxes.append([train_idx] + nms_box)
 
             for box in true_bboxes[idx]:
-                # many will get converted to 0 pred
                 if box[1] > threshold:
                     all_true_boxes.append([train_idx] + box)
 
@@ -203,5 +215,111 @@ def get_bboxes(
 
     model.train()
     return all_pred_boxes, all_true_boxes
+
+
+
+def cellboxes_to_boxes(out, S=7, C=7, B=2, is_predictions=True):
+    """
+    Converts model outputs or labels into a list of boxes per image.
+
+    Returns:
+        list of length batch_size
+        each element is a list of S*S boxes:
+        [class_pred, confidence, x, y, w, h]
+    """
+    if is_predictions:
+        converted = convert_cellboxes(out, S=S, C=C, B=B)
+    else:
+        converted = convert_label_cellboxes(out, S=S, C=C)
+
+    converted = converted.reshape(out.shape[0], S * S, 6)
+    converted[..., 0] = converted[..., 0].long()
+
+    all_bboxes = []
+    for ex_idx in range(out.shape[0]):
+        bboxes = []
+        for bbox_idx in range(S * S):
+            bboxes.append([x.item() for x in converted[ex_idx, bbox_idx, :]])
+        all_bboxes.append(bboxes)
+
+    return all_bboxes
+
+
+def convert_label_cellboxes(labels, S=7, C=7):
+    """
+    labels shape: (batch, S, S, C + 5)
+    or flattened: (batch, S*S*(C + 5))
+
+    Returns:
+        (batch, S, S, 6) where last dim is:
+        [true_class, objectness, x, y, w, h]
+    """
+    labels = labels.to("cpu")
+    batch_size = labels.shape[0]
+    labels = labels.reshape(batch_size, S, S, C + 5)
+
+    true_class = labels[..., :C].argmax(-1).unsqueeze(-1)
+    objectness = labels[..., C:C+1]
+    boxes = labels[..., C+1:C+5]
+
+    cell_x = torch.arange(S).repeat(batch_size, S, 1).unsqueeze(-1)
+    cell_y = cell_x.permute(0, 2, 1, 3)
+
+    x = (boxes[..., 0:1] + cell_x) / S
+    y = (boxes[..., 1:2] + cell_y) / S
+    w_h = boxes[..., 2:4] / S
+
+    converted_bboxes = torch.cat((x, y, w_h), dim=-1)
+    converted_labels = torch.cat(
+        (true_class, objectness, converted_bboxes), dim=-1
+    )
+
+    return converted_labels
+
+
+def convert_cellboxes(predictions, S=7, C=7, B=2):
+    """
+    predictions shape: (batch, S, S, C + B*5)
+    or flattened:      (batch, S*S*(C + B*5))
+
+    Returns:
+        (batch, S, S, 6) where last dim is:
+        [predicted_class, best_confidence, x, y, w, h]
+        with x,y,w,h normalized to the whole image
+    """
+
+    predictions = predictions.to("cpu")
+    batch_size = predictions.shape[0]
+    predictions = predictions.reshape(batch_size, S, S, C + B * 5)
+
+    # class predictions
+    predicted_class = predictions[..., :C].argmax(-1).unsqueeze(-1)
+
+    # bounding boxes and confidences
+    bbox_data = predictions[..., C:]  # shape: (batch, S, S, B*5)
+    bbox_data = bbox_data.reshape(batch_size, S, S, B, 5)
+
+    confidences = bbox_data[..., 0]      # (batch, S, S, B)
+    boxes = bbox_data[..., 1:5]          # (batch, S, S, B, 4)
+
+    best_box_idx = confidences.argmax(-1, keepdim=True)  # (batch, S, S, 1)
+    best_box_idx_expanded = best_box_idx.unsqueeze(-1).expand(-1, -1, -1, -1, 4)
+
+    best_boxes = boxes.gather(3, best_box_idx_expanded).squeeze(3)  # (batch, S, S, 4)
+    best_confidence = confidences.max(-1, keepdim=True).values      # (batch, S, S, 1)
+
+    cell_x = torch.arange(S).repeat(batch_size, S, 1).unsqueeze(-1)
+    cell_y = cell_x.permute(0, 2, 1, 3)
+
+    x = (best_boxes[..., 0:1] + cell_x) / S
+    y = (best_boxes[..., 1:2] + cell_y) / S
+    w_h = best_boxes[..., 2:4] / S
+
+    converted_bboxes = torch.cat((x, y, w_h), dim=-1)
+    converted_preds = torch.cat(
+        (predicted_class, best_confidence, converted_bboxes), dim=-1
+    )
+
+    return converted_preds
             
     
