@@ -67,17 +67,21 @@ def non_max_suppression(
 
     while bboxes:
         chosen_box = bboxes.pop(0)
-        bboxes = [
-            box
-            for box in bboxes
-            if box[0] != chosen_box[0]  # check if it isn't the same class or if it is the IoU is lower than threshold, meaning it is another object
-            or intersection_over_union(
-                torch.tensor(chosen_box[2:]),
-                torch.tensor(box[2:]),
-                box_format=box_format
-            ) < iou_threshold
-        ]
+        remaining_boxes = []
+        for box in bboxes:
+            if box[0] != chosen_box[0]:
+                remaining_boxes.append(box)
+            else:
+                iou = intersection_over_union(
+                    torch.tensor(chosen_box[2:], dtype=torch.float32),
+                    torch.tensor(box[2:], dtype=torch.float32),
+                    box_format=box_format,
+                ).item()
 
+                if iou < iou_threshold:
+                    remaining_boxes.append(box)
+
+        bboxes = remaining_boxes
         bboxes_after_nms.append(chosen_box)
 
     return bboxes_after_nms
@@ -208,7 +212,7 @@ def get_bboxes(
                 all_pred_boxes.append([train_idx] + nms_box)
 
             for box in true_bboxes[idx]:
-                if box[1] > threshold:
+                if box[1] > 0:
                     all_true_boxes.append([train_idx] + box)
 
             train_idx += 1
@@ -279,45 +283,59 @@ def convert_label_cellboxes(labels, S=7, C=7):
 
 def convert_cellboxes(predictions, S=7, C=7, B=2):
     """
-    predictions shape: (batch, S, S, C + B*5)
-    or flattened:      (batch, S*S*(C + B*5))
+    predictions shape:
+        (batch, S*S*(C + B*5)) or (batch, S, S, C + B*5)
 
     Returns:
         (batch, S, S, 6) where last dim is:
-        [predicted_class, best_confidence, x, y, w, h]
-        with x,y,w,h normalized to the whole image
+        [predicted_class, score, x, y, w, h]
     """
 
     predictions = predictions.to("cpu")
     batch_size = predictions.shape[0]
     predictions = predictions.reshape(batch_size, S, S, C + B * 5)
 
-    # class predictions
-    predicted_class = predictions[..., :C].argmax(-1).unsqueeze(-1)
+    # Class scores
+    class_scores = predictions[..., :C]                     # (N, S, S, C)
+    predicted_class = class_scores.argmax(-1, keepdim=True) # (N, S, S, 1)
 
-    # bounding boxes and confidences
-    bbox_data = predictions[..., C:]  # shape: (batch, S, S, B*5)
-    bbox_data = bbox_data.reshape(batch_size, S, S, B, 5)
+    # Gather score of predicted class
+    predicted_class_score = class_scores.gather(
+        -1, predicted_class
+    )  # (N, S, S, 1)
 
-    confidences = bbox_data[..., 0]      # (batch, S, S, B)
-    boxes = bbox_data[..., 1:5]          # (batch, S, S, B, 4)
+    # Box/conf data
+    bbox_data = predictions[..., C:].reshape(batch_size, S, S, B, 5)
+    confidences = bbox_data[..., 0:1]   # (N, S, S, B, 1)
+    boxes = bbox_data[..., 1:5]         # (N, S, S, B, 4)
 
-    best_box_idx = confidences.argmax(-1, keepdim=True)  # (batch, S, S, 1)
-    best_box_idx_expanded = best_box_idx.unsqueeze(-1).expand(-1, -1, -1, -1, 4)
+    # Pick best box by confidence
+    best_box_idx = confidences.argmax(dim=3, keepdim=True)  # (N, S, S, 1, 1)
 
-    best_boxes = boxes.gather(3, best_box_idx_expanded).squeeze(3)  # (batch, S, S, 4)
-    best_confidence = confidences.max(-1, keepdim=True).values      # (batch, S, S, 1)
+    best_boxes = boxes.gather(
+        3, best_box_idx.expand(-1, -1, -1, -1, 4)
+    ).squeeze(3)  # (N, S, S, 4)
 
+    best_confidence = confidences.gather(
+        3, best_box_idx
+    ).squeeze(3)  # (N, S, S, 1)
+
+    # Final score = class score * objectness
+    final_score = predicted_class_score * best_confidence   # (N, S, S, 1)
+
+    # Convert from cell-relative to image-relative
     cell_x = torch.arange(S).repeat(batch_size, S, 1).unsqueeze(-1)
     cell_y = cell_x.permute(0, 2, 1, 3)
 
     x = (best_boxes[..., 0:1] + cell_x) / S
     y = (best_boxes[..., 1:2] + cell_y) / S
-    w_h = best_boxes[..., 2:4] / S
+    w = best_boxes[..., 2:3] / S
+    h = best_boxes[..., 3:4] / S
 
-    converted_bboxes = torch.cat((x, y, w_h), dim=-1)
+    converted_bboxes = torch.cat((x, y, w, h), dim=-1)
+
     converted_preds = torch.cat(
-        (predicted_class, best_confidence, converted_bboxes), dim=-1
+        (predicted_class.float(), final_score, converted_bboxes), dim=-1
     )
 
     return converted_preds
