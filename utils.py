@@ -221,6 +221,13 @@ def get_bboxes(
     return all_pred_boxes, all_true_boxes
 
 
+def unnormalize_image(img: Tensor):
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    img = img.cpu() * std + mean
+    return img.clamp(0, 1)
+
+
 
 def cellboxes_to_boxes(out, S=7, C=7, B=2, is_predictions=True):
     """
@@ -306,7 +313,7 @@ def convert_cellboxes(predictions, S=7, C=7, B=2):
 
     # Box/conf data
     bbox_data = predictions[..., C:].reshape(batch_size, S, S, B, 5)
-    confidences = bbox_data[..., 0:1]   # (N, S, S, B, 1)
+    confidences = torch.sigmoid(bbox_data[..., 0:1])  # (N, S, S, B, 1)
     boxes = bbox_data[..., 1:5]         # (N, S, S, B, 4)
 
     # Pick best box by confidence
